@@ -9,23 +9,19 @@ $stderr.sync = true
 # :name is optional, otherwise uses the basename of this executable
 program :name, 'WinRM Commandline'
 program :version, '1.0.0'
-program :description, 'Executes commands against a remote WinRM Instance'
+program :description, "Executes commands against a remote WinRM Instance"
 
 def basic_auth?(username)
-  if username.split("\\").length.eql?(2)
-    false
-  else
-    true
-  end
+  !username.split("\\").length.eql?(2)
 end
 
 def output_callbacks(session)
   # create some callbacks
-  session.on_output do |host, data|
+  session.on_output do |_, data|
     $stdout.puts data
   end
 
-  session.on_error do |host, err|
+  session.on_error do |_, err|
     $stderr.puts err
   end
 
@@ -34,55 +30,61 @@ def output_callbacks(session)
   end
 end
 
-def encode_script(script)
-      script = script.chars.to_a.join("\x00").chomp
-      script << "\x00" unless script[-1].eql? "\x00"
-      if(defined?(script.encode))
-        script = script.encode('ASCII-8BIT')
-        script = Base64.strict_encode64(script)
-      else
-        script = Base64.encode64(script).chomp
-      end
-      script
+def run_remote(action, host, user, pwd)
+  session = EventMachine::WinRM::Session.new(:log_level => :info)
+  opts = {:user => user, :password => pwd, :basic_auth_only => basic_auth?(user), :operation_timeout => 1800, :disable_sspi => true}
+  session.use(host, opts)
+  output_callbacks(session)
+
+  # run a command
+  session.relay_command(action)
 end
-command :exec do |c|
-  c.syntax = 'execute <command>'
-  c.description = 'Executes a remote command'
 
-  c.option '--computer STRING', String, 'Computer to execute against'
-  c.option '--username STRING', String, 'Username to login with'
-  c.option '--password STRING', String, 'The user\'s password'
+def encode_script(script)
+  script = script.chars.to_a.join("\x00").chomp
+  script << "\x00" unless script[-1].eql? "\x00"
+  if defined?(script.encode)
+    script = script.encode('ASCII-8BIT')
+    script = Base64.strict_encode64(script)
+  else
+    script = Base64.encode64(script).chomp
+  end
+  script
+end
 
-  c.action do |args, options|
+def do_action(c, &tweak_script)
+  c.option '--computer STRING', String, "Computer to execute against"
+  c.option '--username STRING', String, "Username to login with"
+  c.option '--password STRING', String, "The user's password"
+
+  parts = ARGV.join(" ").split(' -- ',2)
+  raise "missing command" unless parts.count > 1
+  script = parts[1]
+  action = tweak_script ? tweak_script.call(script) : script
+
+
+  c.action do |_, options|
+    user = options.username
+    pwd = options.password
+    host = options.computer
 
     # create a session
-    session = EventMachine::WinRM::Session.new(:log_level => :info)
-    opts = {:user => options.username, :password => options.password, :basic_auth_only => basic_auth?(options.username), :operation_timeout => 1800, :disable_sspi => true }
-    session.use(options.computer,opts)
-    output_callbacks(session)
-    # run a command
-    session.relay_command('dir')
-        
-    end
+    run_remote(action, options.computer, options.username, options.password)
+  end
+end
+
+command :exec do |c|
+  c.syntax = 'execute <command>'
+  c.description = "Executes a remote shell command"
+
+  do_action(c)
 end
 
 command :script do |c|
-  c.syntax = 'execute <command>'
-  c.description = 'Executes a remote command'
+  c.syntax = 'script <command>'
+  c.description = "Executes a remote powershell command"
 
-  c.option '--computer STRING', String, 'Computer to execute against'
-  c.option '--username STRING', String, 'Username to login with'
-  c.option '--password STRING', String, 'The user\'s password'
-
-  c.action do |args, options|
-    script = ARGV.join(" ").split(' -- ',2)[1]
-    # create a session
-    session = EventMachine::WinRM::Session.new(:log_level => :info)
-    opts = {:user => options.username, :password => options.password, :basic_auth_only => basic_auth?(options.username),  :operation_timeout => 1800, :disable_sspi => true}
-    session.use(options.computer,opts)
-    output_callbacks(session)
-    # run a command
-    session.relay_command("powershell -encodedCommand #{encode_script(script)}")
-        
-    end
+  do_action(c) do |script|
+    "powershell -encodedCommand #{encode_script(script)}"
+  end
 end
